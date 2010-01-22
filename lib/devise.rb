@@ -1,12 +1,12 @@
 module Devise
   autoload :FailureApp, 'devise/failure_app'
-  autoload :Mapping, 'devise/mapping'
   autoload :Schema, 'devise/schema'
   autoload :TestHelpers, 'devise/test_helpers'
 
   module Controllers
-    autoload :Filters, 'devise/controllers/filters'
+    autoload :Common, 'devise/controllers/common'
     autoload :Helpers, 'devise/controllers/helpers'
+    autoload :InternalHelpers, 'devise/controllers/internal_helpers'
     autoload :UrlHelpers, 'devise/controllers/url_helpers'
   end
 
@@ -26,22 +26,22 @@ module Devise
     autoload :MongoMapper, 'devise/orm/mongo_mapper'
   end
 
-  ALL = [:authenticatable, :activatable, :confirmable, :recoverable, :rememberable,
-         :timeoutable, :trackable, :validatable]
+  ALL = [:authenticatable, :activatable, :confirmable, :recoverable,
+         :rememberable, :validatable, :trackable, :timeoutable, :lockable]
 
   # Maps controller names to devise modules
   CONTROLLERS = {
     :sessions => [:authenticatable],
     :passwords => [:recoverable],
-    :confirmations => [:confirmable]
+    :confirmations => [:confirmable],
+    :unlocks => [:lockable]
   }
 
-  STRATEGIES  = [:authenticatable]
-  SERIALIZERS = [:session, :cookie]
+  STRATEGIES  = [:rememberable, :authenticatable]
   TRUE_VALUES = [true, 1, '1', 't', 'T', 'true', 'TRUE']
 
   # Maps the messages types that are used in flash message.
-  FLASH_MESSAGES = [ :unauthenticated, :unconfirmed, :invalid, :timeout, :inactive ]
+  FLASH_MESSAGES = [ :unauthenticated, :unconfirmed, :invalid, :timeout, :inactive, :locked ]
 
   # Declare encryptors length which are used in migrations.
   ENCRYPTORS_LENGTH = {
@@ -86,15 +86,15 @@ module Devise
 
   # Store scopes mappings.
   mattr_accessor :mappings
-  @@mappings = {}
+  @@mappings = ActiveSupport::OrderedHash.new
 
   # Stores the chosen ORM.
   mattr_accessor :orm
   @@orm = :active_record
 
-  # Configure default options used in :all.
+  # TODO Remove
   mattr_accessor :all
-  @@all = Devise::ALL.dup
+  @@all = []
 
   # Tells if devise should apply the schema in ORMs where devise declaration
   # and schema belongs to the same class (as Datamapper and MongoMapper).
@@ -105,6 +105,19 @@ module Devise
   # turned off by default.
   mattr_accessor :scoped_views
   @@scoped_views = false
+
+  # Number of authentication tries before locking an account
+  mattr_accessor :maximum_attempts
+  @@maximum_attempts = 20
+
+  # Defines which strategy can be used to unlock an account.
+  # Values: :email, :time, :both
+  mattr_accessor :unlock_strategy
+  @@unlock_strategy = :both
+
+  # Time interval to unlock the account if :time is defined as unlock_strategy.
+  mattr_accessor :unlock_in
+  @@unlock_in = 1.hour
 
   # Tell when to use the default scope, if one cannot be found from routes.
   mattr_accessor :use_default_scope
@@ -149,10 +162,8 @@ module Devise
     # block.
     def configure_warden(config) #:nodoc:
       config.default_strategies *Devise::STRATEGIES
-      config.default_serializers *Devise::SERIALIZERS
       config.failure_app = Devise::FailureApp
       config.silence_missing_strategies!
-      config.silence_missing_serializers!
       config.default_scope = Devise.default_scope
 
       # If the user provided a warden hook, call it now.
@@ -168,6 +179,42 @@ module Devise
     def friendly_token
       ActiveSupport::SecureRandom.base64(15).tr('+/=', '-_ ').strip.delete("\n")
     end
+
+    # Make Devise aware of an 3rd party Devise-module. For convenience.
+    #
+    # == Options:
+    #
+    #   +strategy+    - Boolean value representing if this module got a custom *strategy*.
+    #                   Default is +false+. Note: Devise will auto-detect this in such case if this is true.
+    #   +model+       - String representing a load path to a custom *model* for this module (to autoload).
+    #                   Default is +nil+ (i.e. +false+).
+    #   +controller+  - Symbol representing a name of an exisiting or custom *controller* for this module.
+    #                   Default is +nil+ (i.e. +false+).
+    #
+    # == Examples:
+    #
+    #   Devise.add_module(:party_module)
+    #   Devise.add_module(:party_module, :strategy => true, :controller => :sessions)
+    #   Devise.add_module(:party_module, :model => 'party_module/model')
+    #
+    def add_module(module_name, options = {})
+      Devise::ALL.unshift module_name        unless Devise::ALL.include?(module_name)
+      Devise::STRATEGIES.unshift module_name if options[:strategy] && !Devise::STRATEGIES.include?(module_name)
+
+      if options[:controller]
+        controller = options[:controller].to_sym
+        Devise::CONTROLLERS[controller] ||= []
+        Devise::CONTROLLERS[controller].unshift module_name unless Devise::CONTROLLERS[controller].include?(module_name)
+      end
+
+      if options[:model]
+        Devise::Models.module_eval do
+          autoload :"#{module_name.to_s.classify}", options[:model]
+        end
+      end
+
+      Devise::Mapping.register module_name
+    end
   end
 end
 
@@ -178,8 +225,5 @@ rescue
   require 'warden'
 end
 
-# Clear some Warden default configuration which will be overwritten
-Warden::Strategies.clear!
-Warden::Serializers.clear!
-
+require 'devise/mapping'
 require 'devise/rails'
